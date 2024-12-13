@@ -1,0 +1,104 @@
+clc;
+clear;
+
+% Set up the serial port for communication
+s = serialport("COM5", 921600); % COM5 and baud rate of 921600
+
+% Set properties for the serial port
+s.Timeout = 10;  % Set timeout for reading data (in seconds)
+configureTerminator(s, "LF", "LF");  % Set line terminator to LF (Line Feed)
+
+% Set up figure for real-time plotting
+figure;
+h = plot(NaN, NaN);  % Placeholder for ECG plot
+xlabel('Time (ms)');
+ylabel('ECG Signal');
+title('Real-time ECG Plot');
+
+% Update frequency (time between data points in ms)
+update_interval = 10; % Adjust for your desired plot update speed
+
+% File name for saving data
+csv_file_name = 'ecg_preprocessed_data.csv';
+
+% Initialize an empty array for real-time ECG signal
+ecg_data = [];
+
+% Firebase Configuration (updated URL)
+firebaseURL = FIREBASEURL ; % Your public Firebase Realtime Database URL
+firebasePath = '/ecg_data/'; % Path where you want to store ECG data
+
+% Read and plot data in real-time
+while true
+    % Check if data is available
+    if s.NumBytesAvailable > 0
+        % Read data from the serial buffer
+        data = str2double(readline(s)); % Read one line and convert to number
+        
+        % Append the data to the ECG signal array
+        ecg_data = [ecg_data; data];
+        
+        % Step 1: Ensure enough data before detrending
+        if length(ecg_data) > 5
+            ecg_detrended = detrend(ecg_data);  % Detrend if enough data
+        else
+            disp('Not enough data for detrending');
+            ecg_detrended = ecg_data;  % Skip detrending if data is insufficient
+        end
+        
+        % Step 2: Normalize the signal to the range [-1, 1]
+        min_val = min(ecg_detrended);
+        max_val = max(ecg_detrended);
+        ecg_normalized = 2 * (ecg_detrended - min_val) / (max_val - min_val) - 1;  % Normalize to [-1, 1]
+        
+        % Keep only the last 2000 samples for the plot (no buffer)
+        if length(ecg_normalized) > 2000
+            ecg_normalized = ecg_normalized(end-1999:end);  % Keep only the most recent 2000 samples
+        end
+        
+        % Update the plot with the preprocessed data
+        set(h, 'YData', ecg_normalized);
+        set(h, 'XData', 1:length(ecg_normalized));  % Time axis for ECG signal
+        drawnow;
+        
+        % Save the most recent sample to the CSV file
+        label = 0;  % Placeholder: 0 for normal, 1 for abnormal (you can change this logic)
+        
+        % Create a table with the latest data and its label
+        data_table = table(ecg_normalized(end), label, 'VariableNames', {'ECG_Signal', 'Label'});
+        
+        % Append the data to the CSV file
+        if exist(csv_file_name, 'file') == 2
+            % Append data if the file already exists
+            writetable(data_table, csv_file_name, 'WriteMode', 'append', 'WriteRowNames', false);
+        else
+            % Write the table as a new file if it doesn't exist
+            writetable(data_table, csv_file_name, 'WriteMode', 'overwrite', 'WriteRowNames', false);
+        end
+        
+        % Send data to Firebase
+        % Structure the data to send
+        timestamp = datetime('now', 'Format', 'yyyy-MM-dd''T''HH:mm:ss.SSS');
+        dataToSend = struct('timestamp', timestamp, 'ecg_sample', ecg_normalized(end));
+        
+        % Encode data as JSON
+        jsonData = jsonencode(dataToSend);
+        
+        % Define the full URL for the data (unique sample path)
+        fullURL = strcat(firebaseURL, firebasePath, 'sample_', num2str(length(ecg_data)), '.json');
+        
+        % Send the data to Firebase
+        options = weboptions('RequestMethod', 'put', 'MediaType', 'application/json', 'ContentType', 'json');
+        try
+            response = webwrite(fullURL, jsonData, options);
+            disp(['Data sent to Firebase: Sample ' num2str(length(ecg_data))]);
+        catch exception
+            disp(['Error sending data to Firebase: ' exception.message]);
+        end
+    end
+    
+    pause(update_interval / 1000);  % Pause for a brief moment before the next update
+end
+
+% Closing the serial port when done
+clear s;
